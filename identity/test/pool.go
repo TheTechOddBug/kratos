@@ -1285,26 +1285,28 @@ func TestPool(ctx context.Context, p persistence.Persister, m *identity.Manager,
 				require.NoError(t, err)
 				require.Len(t, is, len(createdIDs))
 
-				var results []identity.Identity
-				// It takes about 4.8 seconds to replicate the data.
-				for i := 0; i < 8; i++ {
-					time.Sleep(time.Second)
-
-					// The error here is explicitly ignored because the table / schema might not yet be replicated.
-					// This can lead to "ERROR: cached plan must not change result type (SQLSTATE 0A000)" whih is caused
-					// because the prepared query exist but the schema is not yet replicated.
+				// The data is replicated with eventual consistency (usually a few
+				// seconds). Poll until every identity is visible instead of sleeping
+				// a fixed 8 seconds, so the test returns as soon as replication
+				// completes.
+				listEventually := func() []identity.Identity {
+					// The error is intentionally ignored because the table / schema
+					// might not yet be replicated. This can surface as "cached plan
+					// must not change result type (SQLSTATE 0A000)" because the
+					// prepared query exists but the schema is not yet replicated.
 					is, _, _ := p.ListIdentities(ctx, identity.ListIdentityParameters{
 						Expand:           identity.ExpandEverything,
 						KeySetPagination: []keysetpagination.Option{keysetpagination.WithSize(25)},
 						ConsistencyLevel: crdbx.ConsistencyLevelEventual,
 					})
-
-					if len(is) == len(createdIDs) {
-						results = is
-					}
+					return is
 				}
-				require.NotZero(t, len(results))
-				require.Len(t, results, len(createdIDs), "Could not find all identities after 8 seconds")
+				require.EventuallyWithT(t, func(t *assert.CollectT) {
+					assert.Len(t, listEventually(), len(createdIDs))
+				}, 15*time.Second, 200*time.Millisecond)
+
+				results := listEventually()
+				require.Len(t, results, len(createdIDs), "Could not find all identities")
 
 				var found bool
 				for _, i := range results {
